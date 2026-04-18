@@ -226,6 +226,305 @@ interface LocalRecipesResponse {
   recipes?: RecipeData[];
 }
 
+// ==================== 二级缓存相关接口定义 ====================
+
+// 缓存项接口
+interface CacheItem<T> {
+  data: T;
+  timestamp: number;
+  ttl: number; // 生存时间（毫秒）
+  accessCount: number; // 访问次数，用于LRU策略
+}
+
+// L1缓存配置
+interface L1CacheConfig {
+  maxSize: number;        // 最大缓存项数
+  defaultTTL: number;    // 默认TTL（毫秒）
+}
+
+// L2缓存配置
+interface L2CacheConfig {
+  maxSize: number;        // 最大缓存项数
+  defaultTTL: number;    // 默认TTL（毫秒）
+  compressionEnabled: boolean; // 是否启用压缩
+}
+
+// 缓存统计信息
+interface CacheStats {
+  l1Size: number;
+  l2Size: number;
+  l1HitRate: number;
+  l2HitRate: number;
+}
+
+/**
+ * ==================== 二级缓存管理器 ====================
+ * 实现L1缓存（内存）+ L2缓存（持久化）的二级缓存系统
+ */
+
+// 二级缓存管理器
+class TwoLevelCacheManager<T> {
+  private l1Cache: Map<string, CacheItem<T>> = new Map();
+  private l2Cache: Map<string, CacheItem<T>> = new Map();
+  private l1Config: L1CacheConfig;
+  private l2Config: L2CacheConfig;
+  private preferences?: preferences.Preferences;
+  private l2StorageKey: string;
+
+  constructor(
+    l1Config: L1CacheConfig,
+    l2Config: L2CacheConfig,
+    preferences?: preferences.Preferences,
+    storageKey: string = 'two_level_cache'
+  ) {
+    this.l1Config = l1Config;
+    this.l2Config = l2Config;
+    this.preferences = preferences;
+    this.l2StorageKey = storageKey;
+    this.loadL2CacheFromStorage();
+  }
+
+  /**
+   * 获取缓存项
+   */
+  async get(key: string): Promise<T | null> {
+    const now = Date.now();
+
+    // 1. 先从L1缓存查找
+    const l1Item = this.l1Cache.get(key);
+    if (l1Item && now - l1Item.timestamp < l1Item.ttl) {
+      l1Item.accessCount++;
+      console.info(`[Cache] L1命中: ${key}`);
+      return l1Item.data;
+    }
+
+    // 2. L1未命中，从L2缓存查找
+    const l2Item = this.l2Cache.get(key);
+    if (l2Item && now - l2Item.timestamp < l2Item.ttl) {
+      l2Item.accessCount++;
+      console.info(`[Cache] L2命中: ${key}`);
+      
+      // 3. 将L2命中的数据提升到L1缓存
+      this.promoteToL1(key, l2Item);
+      return l2Item.data;
+    }
+
+    console.info(`[Cache] 未命中: ${key}`);
+    return null;
+  }
+
+  /**
+   * 设置缓存项
+   */
+  async set(key: string, data: T, customTTL?: number): Promise<void> {
+    const now = Date.now();
+    const ttl = customTTL || this.l1Config.defaultTTL;
+
+    // 创建缓存项
+    const cacheItem: CacheItem<T> = {
+      data: data,
+      timestamp: now,
+      ttl: ttl,
+      accessCount: 1
+    };
+
+    // 1. 存入L1缓存
+    this.setL1Cache(key, cacheItem);
+
+    // 2. 如果数据较大或重要，同时存入L2缓存
+    if (this.shouldStoreInL2(data, key)) {
+      this.setL2Cache(key, cacheItem);
+    }
+
+    // 3. 异步持久化L2缓存
+    this.saveL2CacheToStorage();
+  }
+
+  /**
+   * 删除缓存项
+   */
+  async delete(key: string): Promise<void> {
+    this.l1Cache.delete(key);
+    this.l2Cache.delete(key);
+    await this.saveL2CacheToStorage();
+    console.info(`[Cache] 删除: ${key}`);
+  }
+
+  /**
+   * 清空所有缓存
+   */
+  async clear(): Promise<void> {
+    this.l1Cache.clear();
+    this.l2Cache.clear();
+    await this.saveL2CacheToStorage();
+    console.info('[Cache] 清空所有缓存');
+  }
+
+  /**
+   * 获取缓存统计信息
+   */
+  getStats(): CacheStats {
+    return {
+      l1Size: this.l1Cache.size,
+      l2Size: this.l2Cache.size,
+      l1HitRate: this.calculateHitRate(this.l1Cache),
+      l2HitRate: this.calculateHitRate(this.l2Cache)
+    };
+  }
+
+  // 私有方法
+
+  private setL1Cache(key: string, item: CacheItem<T>): void {
+    // 检查L1缓存容量，执行LRU淘汰
+    if (this.l1Cache.size >= this.l1Config.maxSize) {
+      this.evictLRUFromL1();
+    }
+    this.l1Cache.set(key, item);
+  }
+
+  private setL2Cache(key: string, item: CacheItem<T>): void {
+    // 检查L2缓存容量，执行LRU淘汰
+    if (this.l2Cache.size >= this.l2Config.maxSize) {
+      this.evictLRUFromL2();
+    }
+    this.l2Cache.set(key, item);
+  }
+
+  private promoteToL1(key: string, item: CacheItem<T>): void {
+    // 将L2缓存项提升到L1
+    const newItem: CacheItem<T> = {
+      data: item.data,
+      timestamp: item.timestamp,
+      ttl: item.ttl,
+      accessCount: item.accessCount
+    };
+    this.setL1Cache(key, newItem);
+  }
+
+  private shouldStoreInL2(data: T, key: string): boolean {
+    // 判断是否应该存储到L2缓存
+    // 可以基于数据大小、重要性等策略
+    try {
+      const dataSize = JSON.stringify(data).length;
+      return dataSize > 1000 || key.includes('recommendation'); // 大数据或推荐数据存L2
+    } catch {
+      return false;
+    }
+  }
+
+  private evictLRUFromL1(): void {
+    let leastUsedKey: string | null = null;
+    let minAccessCount = Infinity;
+
+    const entries = this.l1Cache.entries();
+    for (const entry of entries) {
+      const key = entry[0];
+      const item = entry[1];
+      if (item.accessCount < minAccessCount) {
+        minAccessCount = item.accessCount;
+        leastUsedKey = key;
+      }
+    }
+
+    if (leastUsedKey) {
+      const evictedItem = this.l1Cache.get(leastUsedKey);
+      if (evictedItem) {
+        // 将淘汰的数据降级到L2缓存
+        this.setL2Cache(leastUsedKey, evictedItem);
+      }
+      this.l1Cache.delete(leastUsedKey);
+      console.info(`[Cache] L1 LRU淘汰: ${leastUsedKey}`);
+    }
+  }
+
+  private evictLRUFromL2(): void {
+    let leastUsedKey: string | null = null;
+    let minAccessCount = Infinity;
+
+    const entries = this.l2Cache.entries();
+    for (const entry of entries) {
+      const key = entry[0];
+      const item = entry[1];
+      if (item.accessCount < minAccessCount) {
+        minAccessCount = item.accessCount;
+        leastUsedKey = key;
+      }
+    }
+
+    if (leastUsedKey) {
+      this.l2Cache.delete(leastUsedKey);
+      console.info(`[Cache] L2 LRU淘汰: ${leastUsedKey}`);
+    }
+  }
+
+  private calculateHitRate(cache: Map<string, CacheItem<T>>): number {
+    if (cache.size === 0) return 0;
+    
+    let totalAccess = 0;
+    for (const item of cache.values()) {
+      totalAccess += item.accessCount;
+    }
+    return totalAccess > 0 ? (totalAccess - cache.size) / totalAccess : 0;
+  }
+
+  private async loadL2CacheFromStorage(): Promise<void> {
+    if (!this.preferences) return;
+
+    try {
+      const cacheData = await this.preferences.get(this.l2StorageKey, '') as string;
+      if (cacheData) {
+        const parsed: ESObject = JSON.parse(cacheData) as ESObject;
+        if (parsed && parsed.items) {
+          const items: ESObject = parsed.items as ESObject;
+          const keys = Object.keys(items);
+          for (let i = 0; i < keys.length; i++) {
+            const key = keys[i];
+            const item = items[key] as CacheItem<T>;
+            // 检查是否过期
+            if (Date.now() - item.timestamp < item.ttl) {
+              this.l2Cache.set(key, item);
+            }
+          }
+        }
+      }
+      console.info(`[Cache] 从存储加载L2缓存: ${this.l2Cache.size}项`);
+    } catch (error) {
+      console.error('[Cache] 加载L2缓存失败:', error);
+    }
+  }
+
+  private async saveL2CacheToStorage(): Promise<void> {
+    if (!this.preferences) return;
+
+    try {
+      const cacheDataObj: ESObject = {
+        items: this.l2CacheToObject(),
+        savedAt: Date.now()
+      };
+      
+      const serialized = JSON.stringify(cacheDataObj);
+      await this.preferences.put(this.l2StorageKey, serialized);
+      await this.preferences.flush();
+    } catch (error) {
+      console.error('[Cache] 保存L2缓存失败:', error);
+    }
+  }
+
+  /**
+   * 将L2缓存转换为普通对象
+   */
+  private l2CacheToObject(): ESObject {
+    const result: ESObject = {};
+    const entries = this.l2Cache.entries();
+    for (const entry of entries) {
+      const key = entry[0];
+      const item = entry[1];
+      result[key] = item;
+    }
+    return result;
+  }
+}
+
 /**
  * ==================== 环境配置 ====================
  * 切换环境：注释/取消注释下面的 BASE_URL 即可
@@ -265,6 +564,10 @@ export default class APIService {
   private recommendationSessionCache: ScoredRecipe[] = [];
   private recommendationSessionSeed: number = 0;
   
+  // 二级缓存管理器
+  private recommendationCache: TwoLevelCacheManager<ScoredRecipe[]>;
+  private userPreferencesCache: TwoLevelCacheManager<UserPreferences>;
+  
   // 公开的 getter
   public get isLoggedIn(): boolean {
     return this._isLoggedIn;
@@ -285,6 +588,28 @@ export default class APIService {
   
   private constructor() {
     // 私有构造函数,确保单例模式
+    
+    // 初始化二级缓存 - L1缓存15项，L2缓存150项
+    const l1Config: L1CacheConfig = {
+      maxSize: 15,        // L1缓存最多15项
+      defaultTTL: 5 * 60 * 1000  // 5分钟TTL
+    };
+
+    const l2Config: L2CacheConfig = {
+      maxSize: 150,       // L2缓存最多150项
+      defaultTTL: 30 * 60 * 1000, // 30分钟TTL
+      compressionEnabled: false
+    };
+
+    this.recommendationCache = new TwoLevelCacheManager<ScoredRecipe[]>(
+      l1Config, l2Config, undefined, 'recommendation_cache'
+    );
+
+    this.userPreferencesCache = new TwoLevelCacheManager<UserPreferences>(
+      { maxSize: 5, defaultTTL: 10 * 60 * 1000 }, // 用户偏好缓存
+      { maxSize: 20, defaultTTL: 60 * 60 * 1000, compressionEnabled: false },
+      undefined, 'user_preferences_cache'
+    );
   }
   
   /**
@@ -429,6 +754,29 @@ export default class APIService {
     // 初始化 preferences
     try {
       this.preferences = await preferences.getPreferences(context, 'apiservice');
+      
+      // 重新初始化二级缓存以使用preferences
+      const l1Config: L1CacheConfig = {
+        maxSize: 15,        // L1缓存最多15项
+        defaultTTL: 5 * 60 * 1000  // 5分钟TTL
+      };
+
+      const l2Config: L2CacheConfig = {
+        maxSize: 150,       // L2缓存最多150项
+        defaultTTL: 30 * 60 * 1000, // 30分钟TTL
+        compressionEnabled: false
+      };
+
+      this.recommendationCache = new TwoLevelCacheManager<ScoredRecipe[]>(
+        l1Config, l2Config, this.preferences, 'recommendation_cache'
+      );
+
+      this.userPreferencesCache = new TwoLevelCacheManager<UserPreferences>(
+        { maxSize: 5, defaultTTL: 10 * 60 * 1000 }, // 用户偏好缓存
+        { maxSize: 20, defaultTTL: 60 * 60 * 1000, compressionEnabled: false },
+        this.preferences, 'user_preferences_cache'
+      );
+      
     } catch (error) {
       console.error('[APIService] 初始化 preferences 失败:', error);
     }
@@ -921,6 +1269,138 @@ export default class APIService {
   }
 
   /**
+   * 获取推荐列表（使用二级缓存优化版本）
+   * @param page 页码（从1开始）
+   * @param limit 每页数量
+   * @param forceRefresh 是否强制刷新（下拉刷新时传true）
+   */
+  public async fetchRecommendationsWithCache(
+    page: number = 1, 
+    limit: number = 10, 
+    forceRefresh: boolean = false
+  ): Promise<RecommendationsResponse> {
+    try {
+      const cacheKey = `recommendations_${page}_${limit}_${this._currentUser?.username || 'anonymous'}`;
+      
+      // 1. 检查缓存（除非强制刷新）
+      if (!forceRefresh) {
+        const cachedRecommendations = await this.recommendationCache.get(cacheKey);
+        if (cachedRecommendations) {
+          console.info(`[APIService] 推荐缓存命中: ${cacheKey}`);
+          return this.formatCachedRecommendations(cachedRecommendations, page, limit);
+        }
+      }
+
+      // 2. 缓存未命中或强制刷新，重新计算
+      console.info(`[APIService] 重新计算推荐: ${cacheKey}`);
+      
+      // 检查用户偏好缓存
+      const preferencesCacheKey = `user_prefs_${this._currentUser?.username || 'anonymous'}`;
+      let userPreferences = await this.userPreferencesCache.get(preferencesCacheKey);
+      
+      if (!userPreferences) {
+        // 重新计算用户偏好
+        let userInteractions: UserInteraction[] = [];
+        if (this._isLoggedIn) {
+          userInteractions = await this.getUserInteractions();
+        }
+        userPreferences = this.analyzeUserPreferences(userInteractions);
+        await this.userPreferencesCache.set(preferencesCacheKey, userPreferences);
+      }
+
+      // 获取所有配方并计算推荐
+      const allRecipesData = await this.getAllRecipes();
+      const recipesResponse = allRecipesData as LocalRecipesResponse;
+      
+      if (!recipesResponse || !recipesResponse.recipes) {
+        throw new APIError('获取配方数据失败', 'FETCH_FAILED');
+      }
+
+      let scoredRecipes: ScoredRecipe[] = [];
+      let isPopularityOnly = false;
+      
+      // 获取当前用户名（用于过滤自己创建的配方）
+      const currentUsername = this._isLoggedIn && this._currentUser ? this._currentUser.username : '';
+      
+      // 未登录或无用户交互数据时，使用人气得分推荐
+      if (!this._isLoggedIn || (userPreferences && userPreferences.interactedRecipeIds.size === 0)) {
+        // 过滤掉当前用户创建的配方
+        const candidateRecipes: RecipeData[] = [];
+        recipesResponse.recipes.forEach((recipe: RecipeData) => {
+          if (!currentUsername || recipe.createdBy !== currentUsername) {
+            candidateRecipes.push(recipe);
+          }
+        });
+        scoredRecipes = this.calculatePopularityOnlyScores(candidateRecipes);
+        isPopularityOnly = true;
+        console.info(`[APIService] 使用人气推荐模式 (登录状态: ${this._isLoggedIn}, 交互数据: ${userPreferences ? userPreferences.interactedRecipeIds.size : 0}条, 过滤自创配方: ${currentUsername || '无'})`);
+      } else {
+        // 过滤掉用户已交互的配方和自己创建的配方
+        const candidateRecipes: RecipeData[] = [];
+        recipesResponse.recipes.forEach((recipe: RecipeData) => {
+          const isOwnRecipe = currentUsername && recipe.createdBy === currentUsername;
+          if (userPreferences && !userPreferences.interactedRecipeIds.has(recipe.id) && !isOwnRecipe) {
+            candidateRecipes.push(recipe);
+          }
+        });
+
+        // 计算推荐得分
+        if (userPreferences) {
+          scoredRecipes = this.calculateRecommendationScores(candidateRecipes, userPreferences);
+        }
+      }
+
+      // 生成分层随机抽样结果
+      const recommendations = this.layeredRandomSampling(scoredRecipes, isPopularityOnly);
+
+      // 缓存结果
+      await this.recommendationCache.set(cacheKey, recommendations);
+
+      // 格式化并返回
+      return this.formatCachedRecommendations(recommendations, page, limit);
+
+    } catch (error) {
+      console.error('[APIService] 获取推荐列表失败:', error);
+      return { recommendations: [], message: '加载失败' };
+    }
+  }
+
+  /**
+   * 格式化缓存的推荐结果
+   */
+  private formatCachedRecommendations(
+    recommendations: ScoredRecipe[], 
+    page: number, 
+    limit: number
+  ): RecommendationsResponse {
+    const startIndex = (page - 1) * limit;
+    const endIndex = startIndex + limit;
+    const paginatedRecipes: ScoredRecipe[] = [];
+    
+    for (let i = startIndex; i < Math.min(endIndex, recommendations.length); i++) {
+      paginatedRecipes.push(recommendations[i]);
+    }
+
+    const formattedRecommendations: RecommendationResult[] = [];
+    paginatedRecipes.forEach((recipe: ScoredRecipe) => {
+      formattedRecommendations.push(this.formatRecommendation(recipe));
+    });
+
+    const totalPages = Math.ceil(recommendations.length / limit);
+    
+    return {
+      recommendations: formattedRecommendations,
+      pagination: {
+        currentPage: page,
+        totalPages: totalPages,
+        totalRecommendations: recommendations.length,
+        limit: limit,
+        hasMore: page < totalPages
+      }
+    };
+  }
+
+  /**
    * 获取用户交互数据（点赞和收藏）
    */
   private async getUserInteractions(): Promise<UserInteraction[]> {
@@ -1272,16 +1752,6 @@ export default class APIService {
     };
 
     return result;
-  }
-
-  /**
-   * 重置推荐会话（下拉刷新时调用）
-   * 清空缓存，下次获取推荐时会重新随机分层抽取
-   */
-  public resetRecommendationSession(): void {
-    this.recommendationSessionCache = [];
-    this.recommendationSessionSeed = Date.now();
-    console.info('[APIService] 推荐会话已重置，将重新随机分层抽取');
   }
 
   /**
@@ -2532,6 +3002,73 @@ export default class APIService {
       const response = await http.createHttp().request(url, this.createRequestOptions(http.RequestMethod.DELETE));
       return response.responseCode === 200;
     } catch (e) { return false; }
+  }
+
+  // ==================== 二级缓存管理方法 ====================
+
+  /**
+   * 清空推荐缓存
+   */
+  public async clearRecommendationCache(): Promise<void> {
+    await this.recommendationCache.clear();
+    await this.userPreferencesCache.clear();
+    console.info('[APIService] 推荐缓存已清空');
+  }
+
+  /**
+   * 获取缓存统计信息
+   */
+  public getCacheStats(): ESObject {
+    return {
+      recommendation: this.recommendationCache.getStats(),
+      userPreferences: this.userPreferencesCache.getStats()
+    };
+  }
+
+  /**
+   * 删除特定推荐缓存
+   */
+  public async deleteRecommendationCache(page: number, limit: number): Promise<void> {
+    const cacheKey = `recommendations_${page}_${limit}_${this._currentUser?.username || 'anonymous'}`;
+    await this.recommendationCache.delete(cacheKey);
+  }
+
+  /**
+   * 删除用户偏好缓存
+   */
+  public async deleteUserPreferencesCache(): Promise<void> {
+    const preferencesCacheKey = `user_prefs_${this._currentUser?.username || 'anonymous'}`;
+    await this.userPreferencesCache.delete(preferencesCacheKey);
+  }
+
+  /**
+   * 预热缓存 - 为常用页面预先加载推荐
+   */
+  public async warmupRecommendationCache(): Promise<void> {
+    console.info('[APIService] 开始预热推荐缓存...');
+    
+    try {
+      // 预热前3页推荐
+      for (let page = 1; page <= 3; page++) {
+        await this.fetchRecommendationsWithCache(page, 10, false);
+      }
+      console.info('[APIService] 推荐缓存预热完成');
+    } catch (error) {
+      console.error('[APIService] 推荐缓存预热失败:', error);
+    }
+  }
+
+  /**
+   * 重置推荐会话（兼容原有方法，同时清空缓存）
+   */
+  public resetRecommendationSession(): void {
+    this.recommendationSessionCache = [];
+    this.recommendationSessionSeed = Date.now();
+    
+    // 同时清空二级缓存
+    this.clearRecommendationCache();
+    
+    console.info('[APIService] 推荐会话已重置，将重新随机分层抽取');
   }
 }
 

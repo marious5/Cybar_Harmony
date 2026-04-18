@@ -661,7 +661,7 @@ export struct UserProfilePage {
   buildLoggedInView() {
     Stack() {
       // 顶部背景图片
-      Image($r('app.media.profile_default_background'))
+      Image($r('app.media.background'))
         .width('100%')
         .height(200)
         .objectFit(ImageFit.Cover)
