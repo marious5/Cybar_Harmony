@@ -1,5 +1,7 @@
 # Cybar_Harmony
 
+English | [简体中文](README.zh-CN.md)
+
 A HarmonyOS client for Cybar, focused on cocktail recipes, recommendations, custom recipe creation, and social interaction features.
 
 This repository contains the HarmonyOS/ArkTS client implementation and adaptation work for the Cybar experience.
@@ -22,27 +24,27 @@ This repository contains the HarmonyOS/ArkTS client implementation and adaptatio
 
 ```text
 entry/src/main/ets/
-├── common/
-│   └── ThemeManager.ets
-├── models/
-│   └── Recipe.ets
-├── services/
-│   └── APIService.ets
-├── pages/
-│   ├── LoginPage.ets
-│   ├── RegisterPage.ets
-│   ├── RecipesPage.ets
-│   ├── RecipeDetailPage.ets
-│   ├── CustomRecipePage.ets
-│   ├── RecommendationsPage.ets
-│   ├── SearchPage.ets
-│   ├── MyFavoritesPage.ets
-│   ├── MyRecipesPage.ets
-│   ├── UserProfilePage.ets
-│   ├── SettingsPage.ets
-│   └── AdminPage.ets
-└── entryability/
-    └── EntryAbility.ets
+|-- common/
+|   `-- ThemeManager.ets
+|-- models/
+|   `-- Recipe.ets
+|-- services/
+|   `-- APIService.ets
+|-- pages/
+|   |-- LoginPage.ets
+|   |-- RegisterPage.ets
+|   |-- RecipesPage.ets
+|   |-- RecipeDetailPage.ets
+|   |-- CustomRecipePage.ets
+|   |-- RecommendationsPage.ets
+|   |-- SearchPage.ets
+|   |-- MyFavoritesPage.ets
+|   |-- MyRecipesPage.ets
+|   |-- UserProfilePage.ets
+|   |-- SettingsPage.ets
+|   `-- AdminPage.ets
+`-- entryability/
+    `-- EntryAbility.ets
 ```
 
 ## Tech Stack
