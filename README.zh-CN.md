@@ -47,6 +47,11 @@ entry/src/main/ets/
     `-- EntryAbility.ets
 ```
 
+## 文档
+
+- [Development Guide](docs/DEVELOPMENT.md)
+- [中文开发说明](docs/DEVELOPMENT.zh-CN.md)
+
 ## 技术栈
 
 - HarmonyOS
@@ -105,4 +110,3 @@ entry/src/main/ets/
 ## 项目状态
 
 该项目适合展示一个功能较完整的 HarmonyOS 客户端：配方浏览、社交互动、用户生成内容、AI 辅助创建、推荐、主题和管理工具。
-

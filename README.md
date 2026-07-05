@@ -47,6 +47,11 @@ entry/src/main/ets/
     `-- EntryAbility.ets
 ```
 
+## Documentation
+
+- [Development Guide](docs/DEVELOPMENT.md)
+- [中文开发说明](docs/DEVELOPMENT.zh-CN.md)
+
 ## Tech Stack
 
 - HarmonyOS
@@ -105,4 +110,3 @@ The client integrates with APIs in these areas:
 ## Status
 
 This project is suitable for demonstrating a larger HarmonyOS client with multiple feature areas: recipe browsing, social interactions, user-generated content, AI-assisted creation, recommendations, theming, and admin tools.
-
